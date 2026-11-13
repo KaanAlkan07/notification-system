@@ -1,0 +1,661 @@
+openapi: 3.1.0
+info:
+  title: Notification Delivery API
+  version: 1.0.0
+  description: |
+    Create, schedule, and track asynchronous SMS, email, and push requests.
+    Successful creation means the request was persisted and queued. An
+    `accepted` status records the provider's acknowledgment of the request.
+
+    The local and testing environments allow unauthenticated requests when
+    the token is empty. Other environments require `NOTIFICATION_API_TOKEN`.
+    When configured, send it in the Bearer authorization header for notification
+    endpoints and metrics.
+servers:
+  - url: http://localhost:8080
+    description: Local Docker Compose
+security:
+  - bearerAuth: []
+  - {}
+tags:
+  - name: Notifications
+  - name: Batches
+  - name: Operations
+paths:
+  /api/v1/notifications:
+    parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+    post:
+      operationId: createNotification
+      summary: Queue a notification
+      tags: [Notifications]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNotification'
+            examples:
+              sms:
+                summary: High-priority SMS
+                value:
+                  channel: sms
+                  recipient: '+905551234567'
+                  content: Your order is ready.
+                  priority: high
+              email:
+                summary: Email
+                value:
+                  channel: email
+                  recipient: user@example.test
+                  content: Your order summary is available.
+              scheduledPush:
+                summary: Scheduled push notification
+                value:
+                  channel: push
+                  recipient: demo-device-token
+                  content: Your reminder is ready.
+                  scheduled_at: '2030-01-01T10:00:00Z'
+      responses:
+        '202':
+          description: Notification queued or recovered by idempotency key
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+            Location:
+              description: URL of the notification
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResponse'
+              examples:
+                queued:
+                  $ref: '#/components/examples/QueuedNotification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    get:
+      operationId: listNotifications
+      summary: List and filter notifications
+      description: Keep the same filters when following a pagination cursor.
+      tags: [Notifications]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/NotificationStatus'
+        - name: channel
+          in: query
+          schema:
+            $ref: '#/components/schemas/Channel'
+        - name: from
+          in: query
+          description: Inclusive lower bound on creation time
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Inclusive upper bound on creation time
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of notifications
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /api/v1/notifications/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      operationId: getNotification
+      summary: Get the current notification status
+      tags: [Notifications]
+      responses:
+        '200':
+          $ref: '#/components/responses/Notification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/notifications/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - $ref: '#/components/parameters/CorrelationId'
+    post:
+      operationId: cancelNotification
+      summary: Cancel a pending notification or scheduled retry
+      description: Cancellation succeeds before a worker claims the next attempt. Repeating a successful cancellation returns the cancelled notification.
+      tags: [Notifications]
+      responses:
+        '200':
+          $ref: '#/components/responses/Notification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Notification is processing or has already reached a terminal outcome
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/notification-batches:
+    parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+    post:
+      operationId: createNotificationBatch
+      summary: Queue a batch of up to 1,000 notifications
+      description: The batch is validated and queued atomically. Each notification then advances independently.
+      tags: [Batches]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBatch'
+            example:
+              notifications:
+                - channel: sms
+                  recipient: '+905551234567'
+                  content: Your order is ready.
+                - channel: email
+                  recipient: user@example.test
+                  content: Your order summary is available.
+                  priority: low
+      responses:
+        '202':
+          description: Batch queued or recovered by idempotency key
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+            Location:
+              description: URL of the batch
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Batch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /api/v1/notification-batches/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      operationId: getNotificationBatch
+      summary: Get batch status counts and a page of its notifications
+      description: Filters affect the member page. Counts always describe the whole batch.
+      tags: [Batches]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/NotificationStatus'
+        - name: channel
+          in: query
+          schema:
+            $ref: '#/components/schemas/Channel'
+        - name: from
+          in: query
+          description: Inclusive lower bound on member creation time
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Inclusive upper bound on member creation time
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/PageSize'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Current batch status and notification page
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+  /health:
+    parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      operationId: getHealth
+      summary: Check database and Redis readiness
+      tags: [Operations]
+      security: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Healthy'
+        '503':
+          $ref: '#/components/responses/Degraded'
+  /metrics:
+    parameters:
+      - $ref: '#/components/parameters/CorrelationId'
+    get:
+      operationId: getMetrics
+      summary: Scrape current queue and delivery metrics
+      description: Includes queue depth, delivery outcomes and latency in Prometheus text format.
+      tags: [Operations]
+      responses:
+        '200':
+          description: Prometheus text exposition
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Unique client-generated key scoped to this creation endpoint. Reusing
+        a key with the same normalized payload returns 202 and the existing
+        resource. A different payload using the same key returns 409.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[!-~]+$'
+      example: order-992-ready-v1
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      description: Client request identifier. The server generates one if the value is missing or invalid.
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+    PageSize:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque next_cursor value from the preceding page
+      schema:
+        type: string
+  headers:
+    CorrelationId:
+      description: Identifier for the current HTTP request
+      schema:
+        $ref: '#/components/schemas/CorrelationId'
+  responses:
+    Notification:
+      description: Current notification
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NotificationResponse'
+    Unauthorized:
+      description: Bearer token missing or invalid when authentication is configured
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    IdempotencyConflict:
+      description: Key was previously used on this endpoint with a different payload
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ValidationFailed:
+      description: Request validation failed
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+    Healthy:
+      description: Both dependencies are available
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+          example:
+            status: ok
+            checks: {database: up, redis: up}
+    Degraded:
+      description: At least one dependency is unavailable
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Health'
+          example:
+            status: degraded
+            checks: {database: up, redis: down}
+  schemas:
+    Channel:
+      type: string
+      enum: [sms, email, push]
+    Priority:
+      type: string
+      enum: [high, normal, low]
+    NotificationStatus:
+      type: string
+      enum: [pending, processing, retrying, accepted, failed, uncertain, cancelled]
+      description: |
+        Pending requests are queued or scheduled. Processing indicates a worker
+        has claimed an attempt. Retrying waits for a subsequent attempt.
+        Accepted indicates the provider acknowledged the request. Failed indicates
+        an explicit terminal failure. Uncertain indicates the provider's outcome
+        could not be determined safely. Cancelled indicates a cancelled request.
+    CorrelationId:
+      type: string
+      pattern: '^[A-Za-z0-9._-]{1,100}$'
+      example: order-992-ready
+    NullableDateTime:
+      type: [string, 'null']
+      format: date-time
+    CreateNotification:
+      type: object
+      required: [recipient, channel, content]
+      properties:
+        recipient:
+          type: string
+          minLength: 1
+        channel:
+          $ref: '#/components/schemas/Channel'
+        content:
+          type: string
+          minLength: 1
+          description: Message text. Per-channel lengths count Unicode characters.
+        priority:
+          $ref: '#/components/schemas/Priority'
+          default: normal
+        scheduled_at:
+          type: string
+          format: date-time
+          description: Earliest delivery time, including time zone offset. Omit to queue immediately.
+      oneOf:
+        - title: SMS
+          properties:
+            channel: {const: sms}
+            recipient:
+              pattern: '^\+[1-9][0-9]{1,14}$'
+              description: E.164 phone number
+            content: {maxLength: 160}
+        - title: Email
+          properties:
+            channel: {const: email}
+            recipient:
+              format: email
+              maxLength: 254
+            content: {maxLength: 10000}
+        - title: Push
+          properties:
+            channel: {const: push}
+            recipient:
+              maxLength: 255
+              pattern: '^[!-~]+$'
+              description: Device token made up of visible ASCII characters
+            content: {maxLength: 240}
+    CreateBatch:
+      type: object
+      required: [notifications]
+      properties:
+        notifications:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/CreateNotification'
+    Notification:
+      type: object
+      required:
+        - id
+        - batch_id
+        - correlation_id
+        - channel
+        - priority
+        - status
+        - attempts
+        - scheduled_at
+        - next_attempt_at
+        - provider_message_id
+        - failure_code
+        - created_at
+        - updated_at
+        - finished_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        batch_id:
+          type: [string, 'null']
+          format: uuid
+        correlation_id:
+          $ref: '#/components/schemas/CorrelationId'
+          description: Correlation identifier recorded when the notification was queued
+        channel:
+          $ref: '#/components/schemas/Channel'
+        priority:
+          $ref: '#/components/schemas/Priority'
+        status:
+          $ref: '#/components/schemas/NotificationStatus'
+        attempts:
+          type: integer
+          minimum: 0
+          description: Delivery attempts claimed by workers
+        scheduled_at:
+          type: string
+          format: date-time
+        next_attempt_at:
+          $ref: '#/components/schemas/NullableDateTime'
+        provider_message_id:
+          type: [string, 'null']
+        failure_code:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        finished_at:
+          $ref: '#/components/schemas/NullableDateTime'
+    NotificationResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Notification'
+    NotificationPage:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque continuation token. Null marks the last page.
+    Batch:
+      type: object
+      required: [id, count, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        count:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        created_at:
+          type: string
+          format: date-time
+    BatchDetailResponse:
+      type: object
+      required: [data, notifications]
+      properties:
+        data:
+          allOf:
+            - $ref: '#/components/schemas/Batch'
+            - type: object
+              required: [status_counts]
+              properties:
+                status_counts:
+                  $ref: '#/components/schemas/StatusCounts'
+        notifications:
+          $ref: '#/components/schemas/NotificationPage'
+    StatusCounts:
+      type: object
+      description: Status totals across the entire batch
+      required: [pending, processing, retrying, accepted, failed, uncertain, cancelled]
+      properties:
+        pending: {type: integer, minimum: 0}
+        processing: {type: integer, minimum: 0}
+        retrying: {type: integer, minimum: 0}
+        accepted: {type: integer, minimum: 0}
+        failed: {type: integer, minimum: 0}
+        uncertain: {type: integer, minimum: 0}
+        cancelled: {type: integer, minimum: 0}
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    ValidationError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [errors]
+          properties:
+            errors:
+              type: object
+              description: Validation messages keyed by input field, using dotted paths for nested fields
+              additionalProperties:
+                type: array
+                minItems: 1
+                items:
+                  type: string
+    Health:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        checks:
+          type: object
+          required: [database, redis]
+          properties:
+            database:
+              type: string
+              enum: [up, down]
+            redis:
+              type: string
+              enum: [up, down]
+  examples:
+    QueuedNotification:
+      summary: An SMS waiting for a worker
+      value:
+        data:
+          id: '6b140661-3b47-4368-bcc1-fc8636c3d547'
+          batch_id: null
+          correlation_id: order-992-ready
+          channel: sms
+          priority: high
+          status: pending
+          attempts: 0
+          scheduled_at: '2026-11-13T10:00:00Z'
+          next_attempt_at: null
+          provider_message_id: null
+          failure_code: null
+          created_at: '2026-11-13T10:00:00Z'
+          updated_at: '2026-11-13T10:00:00Z'
+          finished_at: null

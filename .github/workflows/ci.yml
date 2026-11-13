@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, test and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and start the stack
+        run: |
+          docker compose --profile priority-lanes config --quiet
+          docker compose up --build --wait --wait-timeout 90
+
+      - name: Check Composer manifest and PHP formatting
+        run: |
+          docker compose exec -T app composer validate --no-check-publish
+          docker compose exec -T app composer lint
+
+      - name: Test with SQLite
+        run: >-
+          docker compose run --rm --no-deps -T
+          -e APP_ENV=testing -e DB_CONNECTION=sqlite -e DB_DATABASE=:memory:
+          -e CACHE_STORE=array app composer test
+
+      - name: Test with PostgreSQL and Redis
+        run: |
+          docker compose exec -T postgres createdb -U notifications notifications_test
+          docker compose run --rm --no-deps -T -e APP_ENV=testing -e DB_CONNECTION=pgsql \
+            -e DB_DATABASE=notifications_test -e CACHE_STORE=array -e RUN_REDIS_INTEGRATION=1 app composer test
+
+      - name: Exercise HTTP, queue worker and provider
+        run: |
+          base_url=http://127.0.0.1:8080
+          curl --fail-with-body --silent --show-error "$base_url/health" | jq -e '.status == "ok"'
+
+          body='{"recipient":"+15550102030","channel":"sms","content":"Synthetic test","priority":"high"}'
+          response=$(curl --fail-with-body --silent --show-error --write-out '\n%{http_code}' \
+            -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            -H 'Idempotency-Key: ci-smoke' -d "$body" "$base_url/api/v1/notifications")
+          [[ "${response##*$'\n'}" == 202 ]]
+          id=$(jq -er '.data.id' <<< "${response%$'\n'*}")
+
+          for attempt in {1..20}; do
+            status=$(curl --fail-with-body --silent --show-error -H 'Accept: application/json' \
+              "$base_url/api/v1/notifications/$id" | jq -er '.data.status')
+            case "$status" in
+              accepted)
+                curl --fail-with-body --silent --show-error "$base_url/metrics" > /dev/null
+                exit 0
+                ;;
+              pending|processing|retrying) sleep 1 ;;
+              *) break ;;
+            esac
+          done
+          echo "Notification $id finished polling with status $status." >&2
+          exit 1
+
+      - name: Show service diagnostics on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes
