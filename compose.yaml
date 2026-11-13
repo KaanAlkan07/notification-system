@@ -1,0 +1,119 @@
+x-laravel: &laravel
+  image: notification-system:local
+  pull_policy: never
+  environment: &laravel-env
+    APP_ENV: "${APP_ENV:-local}"
+    APP_DEBUG: "false"
+    APP_KEY: "${APP_KEY:-}"
+    LOG_CHANNEL: stderr
+    LOG_LEVEL: "${LOG_LEVEL:-info}"
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_DATABASE: notifications
+    DB_USERNAME: notifications
+    DB_PASSWORD: "${DB_PASSWORD:-notifications}"
+    CACHE_STORE: redis
+    REDIS_HOST: redis
+    NOTIFICATION_PROVIDER_URL: "${NOTIFICATION_PROVIDER_URL:-http://provider:8080/notifications}"
+    NOTIFICATION_API_TOKEN: "${NOTIFICATION_API_TOKEN:-}"
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: notifications
+      POSTGRES_USER: notifications
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-notifications}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "notifications", "-d", "notifications"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+  migrate:
+    <<: *laravel
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["php", "artisan", "migrate", "--force"]
+
+  provider:
+    image: php:8.4-cli-bookworm
+    restart: unless-stopped
+    user: www-data
+    command: ["php", "-S", "0.0.0.0:8080", "/provider-router.php"]
+    volumes:
+      - ./tools/provider-router.php:/provider-router.php:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+  app:
+    <<: *laravel
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    environment:
+      <<: *laravel-env
+      PHP_CLI_SERVER_WORKERS: "4"
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 25
+
+  worker:
+    <<: *laravel
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    command: ["php", "artisan", "queue:work", "database", "--queue=high,normal,low", "--tries=0", "--timeout=15", "--sleep=1", "--max-time=3600"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      provider:
+        condition: service_healthy
+
+  worker-normal:
+    extends:
+      service: worker
+    profiles: ["priority-lanes"]
+    command: ["php", "artisan", "queue:work", "database", "--queue=normal", "--tries=0", "--timeout=15", "--sleep=1", "--max-time=3600"]
+
+  worker-low:
+    extends:
+      service: worker
+    profiles: ["priority-lanes"]
+    command: ["php", "artisan", "queue:work", "database", "--queue=low", "--tries=0", "--timeout=15", "--sleep=1", "--max-time=3600"]
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,7 @@
+/.env
+/vendor/
+/.phpunit.cache/
+/database/*.sqlite
+/bootstrap/cache/*.php
+/storage/logs/*
+!/storage/logs/.gitignore
