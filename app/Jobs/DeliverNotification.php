@@ -8,13 +8,17 @@ use App\Models\Notification;
 use App\Notifications\Delivery\ChannelRateLimiter;
 use App\Notifications\Delivery\ProviderResult;
 use App\Notifications\Delivery\RetryPolicy;
+use App\Notifications\Delivery\SmtpEmail;
 use App\Notifications\Delivery\TwilioSms;
 use App\Notifications\Delivery\WebhookProvider;
+use App\Notifications\RequestTimestamp;
+use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Predis\PredisException;
 use RedisException;
@@ -35,11 +39,11 @@ final class DeliverNotification implements ShouldQueue
         $this->retryGeneration = $retryGeneration;
     }
 
-    public function handle(ChannelRateLimiter $limiter, WebhookProvider $provider, RetryPolicy $retryPolicy, TwilioSms $twilio): void
+    public function handle(ChannelRateLimiter $limiter, WebhookProvider $provider, RetryPolicy $retryPolicy, TwilioSms $twilio, SmtpEmail $smtp): void
     {
         $reservation = (string) Str::uuid();
         try {
-            $claim = $this->claim($limiter, $reservation);
+            $claim = $this->claim($limiter, $provider, $reservation);
         } catch (PredisException|RedisException) {
             $this->release($this->backoff);
             Log::warning('delivery.limiter_unavailable', ['notification_id' => $this->notificationId]);
@@ -63,7 +67,11 @@ final class DeliverNotification implements ShouldQueue
             return;
         }
 
-        $result = $claim->delivery_status === 'awaiting_receipt' ? $twilio->send($claim) : $provider->send($claim);
+        $result = match (true) {
+            $claim->delivery_status === 'awaiting_receipt' => $twilio->send($claim),
+            $claim->channel === 'email' && config('notifications.email_provider') === 'smtp' => $smtp->send($claim),
+            default => $provider->send($claim),
+        };
         if ($result->status !== 'uncertain') {
             try {
                 $limiter->complete($claim->channel, $reservation);
@@ -75,9 +83,9 @@ final class DeliverNotification implements ShouldQueue
         $this->recordOutcome($claim, $result, $retryPolicy);
     }
 
-    private function claim(ChannelRateLimiter $limiter, string $reservation): Notification|int|null
+    private function claim(ChannelRateLimiter $limiter, WebhookProvider $provider, string $reservation): Notification|int|null
     {
-        return DB::transaction(function () use ($limiter, $reservation): Notification|int|null {
+        return DB::transaction(function () use ($limiter, $provider, $reservation): Notification|int|null {
             $notification = Notification::query()->lockForUpdate()->find($this->notificationId);
 
             if ($notification === null || $notification->retry_generation !== $this->retryGeneration) {
@@ -104,14 +112,15 @@ final class DeliverNotification implements ShouldQueue
                 return random_int(1, 2);
             }
 
+            $usesTwilio = $notification->channel === 'sms' && config('notifications.sms_provider') === 'twilio';
+            $usesSmtp = $notification->channel === 'email' && config('notifications.email_provider') === 'smtp';
             $notification->forceFill([
                 'status' => 'processing',
                 'attempts' => $notification->attempts + 1,
                 'next_attempt_at' => null,
                 'processing_started_at' => now(),
-                'delivery_status' => $notification->channel === 'sms' && config('notifications.sms_provider') === 'twilio'
-                    ? 'awaiting_receipt'
-                    : null,
+                'delivery_status' => $usesTwilio ? 'awaiting_receipt' : null,
+                'webhook_provider_identity' => $usesTwilio || $usesSmtp ? null : $provider->reconciliationIdentity(),
             ])->save();
 
             return $notification;
@@ -133,13 +142,14 @@ final class DeliverNotification implements ShouldQueue
             'processing_started_at' => null,
             'finished_at' => $now,
         ])->save();
+        $this->queueReconciliation($notification);
 
         return $notification;
     }
 
     private function recordOutcome(Notification $notification, ProviderResult $result, RetryPolicy $retryPolicy): void
     {
-        $now = now();
+        $now = CarbonImmutable::now();
         $status = $result->status;
         $delay = null;
 
@@ -152,33 +162,53 @@ final class DeliverNotification implements ShouldQueue
                 $status = 'failed';
             }
         }
+        $nextAttempt = $delay === null ? null : RequestTimestamp::ceilToSecond($now->addSeconds($delay));
 
-        $updated = Notification::query()
+        $changes = [
+            'status' => $status,
+            'provider_message_id' => $result->messageId,
+            'failure_code' => $result->failureCode,
+            'next_attempt_at' => $nextAttempt,
+            'processing_started_at' => null,
+            'finished_at' => $delay === null ? $now : null,
+            'delivery_status' => $status === 'uncertain' ? $notification->delivery_status : $result->deliveryStatus,
+            'delivery_error_code' => $result->deliveryErrorCode,
+            'delivery_updated_at' => $result->deliveryStatus === null ? null : $now,
+        ];
+        $save = fn () => Notification::query()
             ->whereKey($notification->id)
             ->where('status', 'processing')
             ->where('retry_generation', $this->retryGeneration)
             ->where('attempts', $notification->attempts)
-            ->update([
-                'status' => $status,
-                'provider_message_id' => $result->messageId,
-                'failure_code' => $result->failureCode,
-                'next_attempt_at' => $delay === null ? null : $now->copy()->addSeconds($delay),
-                'processing_started_at' => null,
-                'finished_at' => $delay === null ? $now : null,
-                'delivery_status' => $status === 'uncertain' ? $notification->delivery_status : $result->deliveryStatus,
-                'delivery_error_code' => $result->deliveryErrorCode,
-                'delivery_updated_at' => $result->deliveryStatus === null ? null : $now,
-            ]);
+            ->update($changes);
+        $updated = $status === 'uncertain' && $notification->webhook_provider_identity !== null
+            ? DB::transaction(function () use ($save, $notification) {
+                $updated = $save();
+                if ($updated > 0) {
+                    $this->queueReconciliation($notification);
+                }
+
+                return $updated;
+            }, attempts: 3)
+            : $save();
 
         if ($updated === 0) {
             return;
         }
 
-        if ($delay !== null) {
-            $this->release($delay);
+        if ($nextAttempt !== null) {
+            $this->release(max(0, $nextAttempt->timestamp - now()->timestamp));
         }
 
         $this->logOutcome($notification, $status, $result->failureCode);
+    }
+
+    private function queueReconciliation(Notification $notification): void
+    {
+        if ($notification->webhook_provider_identity !== null) {
+            $job = new ReconcileWebhookDelivery($notification->id, $this->retryGeneration, $notification->attempts, $notification->webhook_provider_identity);
+            Queue::connection('database')->push($job->delay(5), queue: $notification->priority);
+        }
     }
 
     private function logOutcome(Notification $notification, string $status, ?string $failureCode): void

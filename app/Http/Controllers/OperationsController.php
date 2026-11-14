@@ -4,9 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\Notification;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Validation\Rule;
 use Throwable;
 
 class OperationsController
@@ -22,6 +24,39 @@ class OperationsController
         $healthy = ! in_array('down', $checks, true);
 
         return response()->json(['status' => $healthy ? 'ok' : 'degraded', 'checks' => $checks], $healthy ? 200 : 503);
+    }
+
+    public function trends(Request $request): JsonResponse
+    {
+        $range = $request->validate(['range' => ['sometimes', 'required', 'string', Rule::in(['24h', '7d'])]])['range'] ?? '24h';
+        [$count, $seconds] = $range === '24h' ? [24, 3600] : [7, 86400];
+        $now = now()->utc();
+        $last = $now->copy()->setTimestamp(intdiv($now->timestamp, $seconds) * $seconds);
+        $first = $last->copy()->subSeconds(($count - 1) * $seconds);
+        $epoch = match (DB::connection()->getDriverName()) {
+            'pgsql' => 'CAST(EXTRACT(EPOCH FROM finished_at) AS BIGINT)',
+            'sqlite' => "CAST(strftime('%s', finished_at) AS INTEGER)",
+        };
+        $bucket = "(($epoch) / $seconds) * $seconds";
+        $rows = DB::table('notifications')->whereIn('status', self::OUTCOMES)
+            ->whereBetween('finished_at', [$first, $now])
+            ->selectRaw("$bucket AS bucket_start, channel, count(*) AS completed, sum(case when status = 'accepted' then 1 else 0 end) AS accepted")
+            ->groupBy('bucket_start', 'channel')->get();
+
+        $buckets = [];
+        $empty = array_fill_keys(Notification::CHANNELS, ['completed' => 0, 'accepted' => 0]);
+        for ($index = 0; $index < $count; $index++) {
+            $start = $first->copy()->addSeconds($index * $seconds);
+            $buckets[$start->timestamp] = ['start' => $start->format('Y-m-d\TH:i:s\Z'), 'channels' => $empty];
+        }
+        foreach ($rows as $row) {
+            $buckets[$row->bucket_start]['channels'][$row->channel] = [
+                'completed' => (int) $row->completed,
+                'accepted' => (int) $row->accepted,
+            ];
+        }
+
+        return response()->json(['bucket_seconds' => $seconds, 'buckets' => array_values($buckets)]);
     }
 
     public function metrics(): Response

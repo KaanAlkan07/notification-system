@@ -19,7 +19,7 @@ class Notification extends Model
 
     protected $guarded = ['id'];
 
-    protected $hidden = ['recipient', 'content', 'processing_started_at'];
+    protected $hidden = ['recipient', 'content', 'processing_started_at', 'webhook_provider_identity'];
 
     protected function casts(): array
     {

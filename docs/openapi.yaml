@@ -27,6 +27,51 @@ tags:
   - name: Provider callbacks
     description: Receive signed delivery status updates.
 paths:
+  /api/v1/notification-trends:
+    get:
+      operationId: getNotificationTrends
+      summary: Get recent notification outcomes by channel and time
+      tags: [Operations]
+      description: Returns UTC buckets including the current partial bucket. Completed counts include accepted, failed, and uncertain notifications by their latest completion time. Calculate the acceptance rate as accepted divided by completed when completed is greater than zero.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: range
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d]
+            default: 24h
+      responses:
+        '200':
+          description: Chronologically ordered outcome counts, including empty buckets
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bucket_seconds, buckets]
+                properties:
+                  bucket_seconds: {type: integer, enum: [3600, 86400]}
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      required: [start, channels]
+                      properties:
+                        start: {type: string, format: date-time}
+                        channels:
+                          type: object
+                          required: [sms, email, push]
+                          properties:
+                            sms: {$ref: '#/components/schemas/TrendCounts'}
+                            email: {$ref: '#/components/schemas/TrendCounts'}
+                            push: {$ref: '#/components/schemas/TrendCounts'}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
   /api/v1/notifications:
     parameters:
       - $ref: '#/components/parameters/CorrelationId'
@@ -509,6 +554,12 @@ components:
             status: degraded
             checks: {database: up, redis: down}
   schemas:
+    TrendCounts:
+      type: object
+      required: [completed, accepted]
+      properties:
+        completed: {type: integer, minimum: 0}
+        accepted: {type: integer, minimum: 0}
     Channel:
       type: string
       enum: [sms, email, push]

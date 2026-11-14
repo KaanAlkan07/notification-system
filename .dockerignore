@@ -13,3 +13,4 @@ storage/framework/views/*
 database/*.sqlite*
 .phpunit.cache/
 .phpunit.result.cache
+tools/load-test/results/

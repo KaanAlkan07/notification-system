@@ -1,0 +1,78 @@
+{
+  "runId": "724e4549-cb0f-4746-b0a8-f441e625fb21",
+  "total": 1000000,
+  "workerCount": 10,
+  "clients": 4,
+  "watermark": 18000,
+  "batchCount": 1000,
+  "idempotentReplays": 3,
+  "retryingObserved": true,
+  "ingressSeconds": 3632.936399658,
+  "elapsedSeconds": 3715.1809631300002,
+  "providerSeconds": 3700.145791043,
+  "transportRetries": 0,
+  "expected": {
+    "sms": {
+      "unique": 333334,
+      "calls": 333460,
+      "providerAccepted": 333292,
+      "accepted": 333271,
+      "failed": 42,
+      "uncertain": 21
+    },
+    "email": {
+      "unique": 333333,
+      "calls": 333459,
+      "providerAccepted": 333291,
+      "accepted": 333270,
+      "failed": 42,
+      "uncertain": 21
+    },
+    "push": {
+      "unique": 333333,
+      "calls": 333459,
+      "providerAccepted": 333291,
+      "accepted": 333270,
+      "failed": 42,
+      "uncertain": 21
+    }
+  },
+  "expectedByMode": {
+    "429_then_ok": 63,
+    "503_then_ok": 63,
+    "503_always": 63,
+    "422_always": 63,
+    "lost_reply": 63
+  },
+  "rate": {
+    "peaks": {
+      "sms": {
+        "calls": 333460,
+        "maxRollingSecond": 100,
+        "peakWindowEndMs": 9106.413036,
+        "overLimitWindows": 0
+      },
+      "email": {
+        "calls": 333459,
+        "maxRollingSecond": 100,
+        "peakWindowEndMs": 9104.70971,
+        "overLimitWindows": 0
+      },
+      "push": {
+        "calls": 333459,
+        "maxRollingSecond": 100,
+        "peakWindowEndMs": 9104.271648,
+        "overLimitWindows": 0
+      }
+    },
+    "overLimitWindows": 0
+  },
+  "retryDelayMs": {
+    "min": 7045.967305999948,
+    "max": 24191.548069999997
+  },
+  "errors": 0,
+  "keyErrors": 0,
+  "duplicates": 0,
+  "extraAttempts": 0
+}

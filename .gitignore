@@ -1,6 +1,7 @@
 /.env
 /vendor/
 /.phpunit.cache/
+/tools/load-test/results/
 /database/*.sqlite
 /bootstrap/cache/*.php
 /storage/logs/*

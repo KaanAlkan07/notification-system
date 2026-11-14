@@ -1,0 +1,69 @@
+services:
+  provider:
+    image: node:24-bookworm-slim
+    entrypoint: ["node"]
+    command: ["/bench/provider.cjs"]
+    working_dir: /bench
+    user: node
+    environment:
+      BENCH_TOTAL: "${BENCH_TOTAL:-1000000}"
+    volumes: !override
+      - type: bind
+        source: "${BENCH_DIR}"
+        target: /bench
+        read_only: true
+    networks:
+      default:
+        aliases: [synthetic-provider]
+    healthcheck:
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  migrate:
+    image: notification-system:compose-load
+  app:
+    image: notification-system:compose-load
+    ports: !reset []
+    environment:
+      APP_ENV: local
+      NOTIFICATION_PROVIDER_URL: http://synthetic-provider:8080/notifications
+      NOTIFICATION_PROVIDER_STATUS_URL: ""
+      NOTIFICATION_PROVIDER_STATUS_TOKEN: ""
+      NOTIFICATION_SMS_PROVIDER: webhook
+      NOTIFICATION_EMAIL_PROVIDER: webhook
+      NOTIFICATION_API_TOKEN: ""
+  worker:
+    image: notification-system:compose-load
+    environment:
+      APP_ENV: local
+      NOTIFICATION_PROVIDER_URL: http://synthetic-provider:8080/notifications
+      NOTIFICATION_PROVIDER_STATUS_URL: ""
+      NOTIFICATION_PROVIDER_STATUS_TOKEN: ""
+      NOTIFICATION_SMS_PROVIDER: webhook
+      NOTIFICATION_EMAIL_PROVIDER: webhook
+      LOG_LEVEL: warning
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "2"
+  driver:
+    image: node:24-bookworm-slim
+    entrypoint: ["node"]
+    command: ["/bench/drive.cjs"]
+    profiles: ["run-bench"]
+    working_dir: /bench
+    volumes:
+      - type: bind
+        source: "${BENCH_DIR}"
+        target: /bench
+        read_only: true
+      - type: bind
+        source: "${BENCH_RESULTS}"
+        target: /results
+    environment:
+      BENCH_TOTAL: "${BENCH_TOTAL:-1000000}"
+      BENCH_WORKERS: "${BENCH_WORKERS:-10}"
+      BENCH_WATERMARK: "${BENCH_WATERMARK:-18000}"
+      BENCH_CLIENTS: "${BENCH_CLIENTS:-4}"
+networks:
+  default:
+    internal: true

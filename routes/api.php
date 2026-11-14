@@ -13,6 +13,7 @@ Route::post('/webhooks/twilio/sms/{id}/{generation}/{attempt}', TwilioReceiptCon
     ->whereUuid('id')->whereNumber('generation')->where('attempt', '[1-9][0-9]*');
 
 Route::middleware('api.token')->prefix('api/v1')->group(function () {
+    Route::get('notification-trends', [OperationsController::class, 'trends']);
     Route::post('notifications', [NotificationController::class, 'store']);
     Route::get('notifications', [NotificationController::class, 'index']);
     Route::get('notifications/{id}', [NotificationController::class, 'show'])->whereUuid('id');

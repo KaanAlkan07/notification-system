@@ -10,7 +10,7 @@
     <title>Bildirim Merkezi</title>
 </head>
 <body>
-<a class="skip" href="#main">İçeriğe geç</a>
+<a class="skip" href="#page-title">İçeriğe geç</a>
 <header class="top">
     <a class="brand" href="/" aria-label="Bildirim Merkezi ana sayfa">
         <svg aria-hidden="true" width="27" height="27" viewBox="0 0 28 28" fill="none">
@@ -19,22 +19,22 @@
         Bildirim Merkezi
     </a>
     <div class="top-context">
-        <span>Çalışma alanı <span class="slash">/</span> Bildirimler</span>
+        <span>Çalışma alanı <span class="slash">/</span> <span id="current-view">Genel bakış</span></span>
         <span class="health" id="health" data-state="loading"><i></i><span>Bağlantı kontrol ediliyor</span></span>
     </div>
 </header>
 <div class="layout">
     <aside class="sidebar">
-        <nav aria-label="Çalışma alanı">
-            <a href="#main" aria-current="page">
+        <nav id="workspace-nav" aria-label="Çalışma alanı">
+            <a href="#main" data-view="main" aria-current="page">
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 10h16M9 10v9"/></svg>
                 Genel bakış
             </a>
-            <a href="#history">
+            <a href="#history" data-view="history">
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 5h14M5 12h14M5 19h14"/></svg>
                 Bildirim geçmişi
             </a>
-            <a href="#composer">
+            <a href="#composer" data-view="composer">
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
                 Yeni bildirim
             </a>
@@ -48,30 +48,96 @@
             </form>
         </details>
     </aside>
-    <main class="sheet" id="main" tabindex="-1">
+    <main class="sheet">
         <header class="page-heading">
             <div>
-                <h1>Bildirimler</h1>
-                <p>SMS, e-posta ve anlık bildirimleri tek ekrandan yönet.</p>
+                <h1 id="page-title" tabindex="-1">Genel bakış</h1>
+                <p id="page-description">Bildirim kuyruğunu ve son 5 dakikanın sonuçlarını izle.</p>
             </div>
-            <button class="button" id="refresh" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5.3"/></svg>
-                Yenile
-            </button>
+            <div class="page-actions" id="page-actions">
+                <button class="button" id="refresh" type="button">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5.3"/></svg>
+                    Yenile
+                </button>
+                <a href="#composer" class="button primary">Yeni bildirim</a>
+            </div>
         </header>
         <p class="notice" id="connection-notice" role="alert" hidden></p>
-        <section class="overview" aria-label="Teslimat özeti">
+        <div id="overview-panel">
+          <section class="overview" aria-label="Teslimat özeti">
             <div><span>Kuyruktaki işler</span><strong id="queued">—</strong><small>Tüm öncelikler</small></div>
             <div><span>Kabul edilen</span><strong id="accepted">—</strong><small>Son 5 dakika</small></div>
             <div><span>Başarısız veya belirsiz</span><strong id="failed">—</strong><small>Son 5 dakika</small></div>
-        </section>
+          </section>
+          <section class="panel trends" aria-labelledby="trends-heading">
+            <header class="panel-heading trends-heading">
+                <div><h2 id="trends-heading">Zaman içindeki gönderimler</h2><p>Sonuçlanma zamanına göre · UTC</p></div>
+                <label><span class="sr-only">Grafik zaman aralığı</span>
+                    <select id="trend-range"><option value="24h">Son 24 saat</option><option value="7d">Son 7 gün</option></select>
+                </label>
+            </header>
+            <p class="empty" id="trend-message" role="status">Grafik verileri yükleniyor…</p>
+            <div id="trend-data" hidden>
+                <ul class="trend-key" id="trend-key" aria-label="Grafik kanalları"></ul>
+                <div class="trend-grid">
+                    <figure><figcaption>Sonuçlanan gönderimler</figcaption><canvas id="trend-volume" aria-hidden="true"></canvas></figure>
+                    <figure><figcaption>Sağlayıcı kabul oranı</figcaption><canvas id="trend-rate" aria-hidden="true"></canvas></figure>
+                </div>
+                <div class="trend-inspector">
+                    <label for="trend-bucket">İncelenen aralık</label>
+                    <select id="trend-bucket"></select>
+                </div>
+                <div class="table-scroll" role="region" aria-label="Seçilen aralığın grafik verileri" tabindex="0">
+                    <table class="metrics-table trend-values">
+                        <thead><tr><th scope="col">Kanal</th><th scope="col">Sonuçlanan</th><th scope="col">Kabul edilen</th><th scope="col">Kabul oranı</th></tr></thead>
+                        <tbody id="trend-values"></tbody>
+                    </table>
+                </div>
+            </div>
+          </section>
+          <div class="overview-grid">
+            <section class="panel" aria-labelledby="channel-heading">
+                <header class="panel-heading">
+                    <h2 id="channel-heading">Kanal performansı</h2>
+                    <p>Son 5 dakikadaki sağlayıcı sonuçları</p>
+                </header>
+                <div class="table-scroll" role="region" aria-labelledby="channel-heading" tabindex="0">
+                    <table class="metrics-table">
+                        <thead><tr><th scope="col">Kanal</th><th scope="col">Kabul</th><th scope="col">Başarısız</th><th scope="col">Belirsiz</th><th scope="col">Ort. süre</th></tr></thead>
+                        <tbody id="channel-results"></tbody>
+                    </table>
+                </div>
+            </section>
+            <section class="panel" aria-labelledby="queue-heading">
+                <header class="panel-heading">
+                    <h2 id="queue-heading">Kuyruk dağılımı</h2>
+                    <p>Bekleyen, planlanan ve işlenen işler</p>
+                </header>
+                <ul class="queue-list" id="queue-results"></ul>
+            </section>
+          </div>
+          <section class="panel activity" aria-labelledby="activity-heading">
+            <header class="panel-heading">
+                <h2 id="activity-heading">Son bildirimler</h2>
+                <a class="text-button" href="#history">Tüm geçmişi gör</a>
+            </header>
+            <div class="table-scroll" role="region" aria-labelledby="activity-heading" tabindex="0" id="activity-table" hidden>
+                <table>
+                    <thead><tr><th scope="col">Bildirim</th><th scope="col">Durum</th><th scope="col">Öncelik</th><th scope="col">Oluşturulma</th></tr></thead>
+                    <tbody id="activity-rows"></tbody>
+                </table>
+            </div>
+            <p class="empty" id="activity-empty">Bildirimler yükleniyor…</p>
+          </section>
+        </div>
         <div class="workspace">
-            <section id="history" class="history" aria-labelledby="history-heading">
+            <section id="history-panel" class="history" aria-labelledby="history-heading" hidden>
                 <header class="section-heading">
                     <div>
-                        <h2 id="history-heading">Bildirim geçmişi</h2>
+                        <h2 id="history-heading" class="sr-only">Bildirim geçmişi</h2>
                         <p id="freshness">Bildirimler yükleniyor</p>
                     </div>
+                    <p id="result-count"></p>
                 </header>
                 <search>
                     <form id="filters" class="filters" aria-label="Bildirimleri filtrele">
@@ -100,6 +166,7 @@
                             </select>
                         </label>
                         <button type="submit" class="button">Filtrele</button>
+                        <button type="button" class="text-button" id="clear-filters" hidden>Filtreleri temizle</button>
                     </form>
                 </search>
                 <div class="table-scroll" role="region" aria-labelledby="history-heading" tabindex="0">
@@ -115,9 +182,10 @@
                     <button type="button" class="button" id="next">Sonraki</button>
                 </footer>
             </section>
-            <section id="composer" class="composer" aria-labelledby="compose-heading">
+            <div id="composer-panel" class="composer-grid" hidden>
+            <section class="composer" aria-labelledby="compose-heading">
                 <header class="section-heading">
-                    <h2 id="compose-heading">Yeni bildirim</h2>
+                    <h2 id="compose-heading" class="sr-only">Yeni bildirim</h2>
                     <button class="text-button" id="sample" type="button">Örnek doldur</button>
                 </header>
                 <form id="compose" method="post" action="/api/v1/notifications" aria-labelledby="compose-heading">
@@ -158,6 +226,26 @@
                     <noscript><p>Bildirim oluşturmak için JavaScript’i etkinleştir.</p></noscript>
                 </form>
             </section>
+            <section class="panel preview" aria-labelledby="preview-heading">
+                <header class="panel-heading"><h2 id="preview-heading">Gönderim önizlemesi</h2></header>
+                <div class="preview-body">
+                    <article class="message-preview">
+                        <div class="message-heading">
+                            <span class="message-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path id="preview-icon" d="M4 5h16v11H9l-5 4zM8 9h8M8 12h5"/></svg>
+                            </span>
+                            <div><strong id="preview-channel">SMS</strong><span id="preview-recipient">Alıcı girilmedi</span></div>
+                        </div>
+                        <p id="preview-content" data-empty="true">Mesajını yazınca burada görünecek.</p>
+                    </article>
+                    <dl class="preview-fields">
+                        <div><dt>Öncelik</dt><dd id="preview-priority">Normal</dd></div>
+                        <div><dt>Gönderim zamanı</dt><dd id="preview-schedule">Sıradaki uygun zamanda</dd></div>
+                        <div><dt>Kullanılan karakter</dt><dd id="preview-limit">0 / 160</dd></div>
+                    </dl>
+                </div>
+            </section>
+            </div>
         </div>
     </main>
 </div>

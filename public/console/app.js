@@ -1,3 +1,5 @@
+import { setupTrends } from './trends.js';
+
 const $ = (id) => document.getElementById(id);
 const api = '/api/v1/notifications';
 const channels = {
@@ -12,6 +14,11 @@ const states = {
     delivered: 'Teslim edildi', undelivered: 'Teslim edilemedi',
 };
 const priorities = { high: 'Yüksek', normal: 'Normal', low: 'Düşük' };
+const channelIcons = {
+    sms: 'M4 5h16v11H9l-5 4zM8 9h8M8 12h5',
+    email: 'M4 6h16v12H4zM4 6l8 7 8-7',
+    push: 'M6 17h12l-2-3v-3a4 4 0 0 0-8 0v3zM10 20h4',
+};
 const date = new Intl.DateTimeFormat('tr-TR', { dateStyle: 'short', timeStyle: 'short' });
 const time = new Intl.DateTimeFormat('tr-TR', { timeStyle: 'medium' });
 const numbers = new Intl.NumberFormat('tr-TR');
@@ -71,6 +78,7 @@ function row(notification) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'row-button';
+    button.dataset.notificationId = notification.id;
     button.textContent = channels[notification.channel]?.label ?? notification.channel;
     const id = document.createElement('span');
     id.className = 'identifier';
@@ -85,6 +93,16 @@ function row(notification) {
     return tr;
 }
 
+function updateRows(container, notifications) {
+    const activeId = container.contains(document.activeElement)
+        ? document.activeElement.dataset.notificationId : null;
+    container.replaceChildren(...notifications.map(row));
+    if (activeId) {
+        const match = [...container.querySelectorAll('button')].find(button => button.dataset.notificationId === activeId);
+        (match ?? container.closest('.table-scroll')).focus({ preventScroll: true });
+    }
+}
+
 async function loadList() {
     const version = ++listRequest;
     const query = new URLSearchParams(filters);
@@ -94,13 +112,13 @@ async function loadList() {
         const result = await (await request(api + '?' + query)).json();
         if (version !== listRequest) return;
         nextCursor = result.next_cursor;
-        const focused = $('rows').contains(document.activeElement);
-        if (!focused) $('rows').replaceChildren(...result.data.map(row));
+        updateRows($('rows'), result.data);
         $('empty').hidden = result.data.length > 0;
         $('empty').textContent = filters.size
             ? 'Bu filtrelere uyan bildirim yok.'
             : 'Henüz bildirim yok. Başlamak için yeni bir bildirim oluştur.';
         $('freshness').textContent = 'Son güncelleme ' + time.format(new Date());
+        $('result-count').textContent = numbers.format(result.data.length) + ' bildirim bu sayfada';
         $('pager').hidden = !nextCursor && cursors.length === 1;
         $('previous').disabled = cursors.length === 1;
         $('next').disabled = !nextCursor;
@@ -112,11 +130,46 @@ async function loadList() {
         $('empty').hidden = true;
         $('pager').hidden = true;
         $('freshness').textContent = 'Geçmiş güncellenemedi';
+        $('result-count').textContent = '';
         if (error.status === 401) $('access').open = true;
         notice($('connection-notice'), error.status === 401
             ? 'Bildirimleri görmek için API anahtarını gir.'
             : 'Bildirimlere erişilemiyor. Bağlantıyı kontrol edip yeniden dene.');
     }
+}
+
+async function loadActivity() {
+    try {
+        const { data } = await (await request(api + '?per_page=5')).json();
+        updateRows($('activity-rows'), data);
+        $('activity-table').hidden = data.length === 0;
+        $('activity-empty').hidden = data.length > 0;
+        $('activity-empty').textContent = 'Henüz bildirim yok. Bir bildirim oluşturduğunda burada görünecek.';
+    } catch {
+        $('activity-table').hidden = true;
+        $('activity-empty').hidden = false;
+        $('activity-empty').textContent = 'Son bildirimler alınamadı.';
+    }
+}
+
+function metricMap(text) {
+    const metrics = new Map();
+    for (const line of text.split('\n')) {
+        const match = /^(notifications_[a-z0-9_]+)\{([^}]+)\}\s+(\S+)$/.exec(line);
+        if (match) metrics.set(match[1] + ' ' + match[2], Number(match[3]));
+    }
+    return (name, labels) => {
+        const value = metrics.get(name + ' ' + labels);
+        return Number.isFinite(value) && value >= 0 ? value : null;
+    };
+}
+
+function metricValue(value) {
+    return value === null ? '—' : numbers.format(value);
+}
+
+function metricTotal(values) {
+    return values.includes(null) ? null : values.reduce((sum, value) => sum + value, 0);
 }
 
 async function loadMetrics() {
@@ -126,17 +179,45 @@ async function loadMetrics() {
     } catch {
         // An unavailable series is displayed as a dash.
     }
-    const values = { queued: [], accepted: [], failed: [] };
-    for (const line of metrics.split('\n')) {
-        const match = /^(notifications_queue_depth|notifications_outcomes_5m)\{([^}]+)\} (\d+)$/.exec(line);
-        if (!match) continue;
-        const key = match[1] === 'notifications_queue_depth' ? 'queued'
-            : match[2].includes('outcome="accepted"') ? 'accepted' : 'failed';
-        values[key].push(Number(match[3]));
-    }
-    for (const [key, series] of Object.entries(values)) {
-        $(key).textContent = series.length ? numbers.format(series.reduce((sum, value) => sum + value, 0)) : '—';
-    }
+    const read = metricMap(metrics);
+    const channelStats = Object.entries(channels).map(([key, { label }]) => {
+        const outcomes = ['accepted', 'failed', 'uncertain'].map(outcome => read('notifications_outcomes_5m', 'channel="' + key + '",outcome="' + outcome + '"'));
+        const latency = read('notifications_acceptance_latency_seconds_avg_5m', 'channel="' + key + '"');
+        return { label, outcomes, latency };
+    });
+    $('channel-results').replaceChildren(...channelStats.map(({ label, outcomes, latency }) => {
+        const tr = document.createElement('tr');
+        const channel = document.createElement('th');
+        channel.scope = 'row';
+        channel.textContent = label;
+        tr.append(channel);
+        for (const value of outcomes) tr.insertCell().textContent = metricValue(value);
+        tr.insertCell().textContent = latency === null ? '—' : metricValue(latency) + ' sn';
+        return tr;
+    }));
+    const queueStats = Object.entries(priorities).map(([key, label]) => ({
+        label, count: read('notifications_queue_depth', 'priority="' + key + '"'),
+    }));
+    const queueTotal = metricTotal(queueStats.map(({ count }) => count));
+    $('queue-results').replaceChildren(...queueStats.map(({ label, count }) => {
+        const item = document.createElement('li');
+        const heading = document.createElement('span');
+        const value = document.createElement('strong');
+        heading.textContent = label;
+        value.textContent = metricValue(count);
+        item.append(heading, value);
+        if (queueTotal > 0) {
+            const meter = document.createElement('progress');
+            meter.max = queueTotal;
+            meter.value = count;
+            meter.setAttribute('aria-label', label + ' öncelikli işlerin kuyruktaki payı');
+            item.append(meter);
+        }
+        return item;
+    }));
+    $('queued').textContent = metricValue(queueTotal);
+    $('accepted').textContent = metricValue(metricTotal(channelStats.map(({ outcomes }) => outcomes[0])));
+    $('failed').textContent = metricValue(metricTotal(channelStats.flatMap(({ outcomes }) => outcomes.slice(1))));
 }
 
 async function loadHealth() {
@@ -150,11 +231,14 @@ async function loadHealth() {
     $('health').lastElementChild.textContent = healthy ? 'Sistem çalışıyor' : 'Bağlantı sorunu';
 }
 
-async function refresh() {
+async function refresh(forceTrends = false) {
     if (updating) return;
     updating = true;
     try {
-        await Promise.all([loadList(), loadMetrics(), loadHealth(), refreshDetail()]);
+        await Promise.all([
+            loadList(), loadActivity(), loadMetrics(), loadHealth(), refreshDetail(),
+            $('overview-panel').hidden ? null : loadTrends(forceTrends),
+        ]);
     } finally {
         updating = false;
     }
@@ -167,6 +251,21 @@ function currentChannel() {
 function updateCount() {
     $('count').textContent = Array.from(content.value).length + ' / ' + currentChannel().limit;
     content.setCustomValidity('');
+    updatePreview();
+}
+
+function updatePreview() {
+    const channel = compose.elements.channel.value;
+    const scheduled = new Date($('scheduled_at').value);
+    const hasMessage = content.value.trim().length > 0;
+    $('preview-icon').setAttribute('d', channelIcons[channel]);
+    $('preview-channel').textContent = channels[channel].label;
+    $('preview-recipient').textContent = recipient.value.trim() || 'Alıcı girilmedi';
+    $('preview-content').textContent = hasMessage ? content.value : 'Mesajını yazınca burada görünecek.';
+    $('preview-content').dataset.empty = String(!hasMessage);
+    $('preview-priority').textContent = priorities[$('priority').value];
+    $('preview-schedule').textContent = Number.isNaN(scheduled.getTime()) ? 'Sıradaki uygun zamanda' : date.format(scheduled);
+    $('preview-limit').textContent = $('count').textContent;
 }
 
 function updateChannel() {
@@ -237,7 +336,7 @@ compose.addEventListener('submit', async (event) => {
         link.textContent = ' Durumu gör';
         link.addEventListener('click', () => openDetail(data.id));
         $('form-message').append(' ', link);
-        await Promise.all([loadList(), loadMetrics()]);
+        await Promise.all([loadList(), loadActivity(), loadMetrics()]);
     } catch (error) {
         notice($('form-message'), formatSubmitError(error));
     } finally {
@@ -325,7 +424,7 @@ async function changeDelivery(action, { body, success, conflict, failure }) {
             notice($('detail-message'), success, true);
             if (button.hidden) $('detail-close').focus();
         }
-        await Promise.all([loadList(), loadMetrics()]);
+        await Promise.all([loadList(), loadActivity(), loadMetrics()]);
     } catch (error) {
         if (dialog.open && id === selected) {
             notice($('detail-message'), error.status === 409 ? conflict : failure);
@@ -353,8 +452,14 @@ $('retry').addEventListener('click', () => changeDelivery('retry', {
 $('filters').addEventListener('submit', (event) => {
     event.preventDefault();
     filters = new URLSearchParams([...new FormData(event.currentTarget)].filter(([, value]) => value));
+    $('clear-filters').hidden = !filters.size;
     cursors = [null];
     void loadList();
+});
+$('clear-filters').addEventListener('click', () => {
+    $('filters').reset();
+    $('filters').requestSubmit();
+    $('filters').querySelector('select').focus();
 });
 $('previous').addEventListener('click', () => {
     if (cursors.length > 1) {
@@ -375,9 +480,9 @@ $('access-form').addEventListener('submit', (event) => {
     token = $('token').value.trim();
     $('token').value = '';
     $('access').open = false;
-    void Promise.all([loadList(), loadMetrics()]);
+    void Promise.all([loadList(), loadActivity(), loadMetrics()]);
 });
-$('refresh').addEventListener('click', refresh);
+$('refresh').addEventListener('click', () => void refresh(true));
 $('sample').addEventListener('click', () => {
     recipient.value = currentChannel().sample;
     recipient.removeAttribute('aria-invalid');
@@ -389,17 +494,53 @@ $('sample').addEventListener('click', () => {
 });
 compose.addEventListener('change', (event) => {
     if (event.target.name === 'channel') updateChannel();
+    else updatePreview();
 });
 compose.addEventListener('input', (event) => {
     event.target.removeAttribute('aria-invalid');
     if (event.target === content) updateCount();
+    else updatePreview();
 });
-document.querySelector('nav').addEventListener('click', (event) => {
-    const link = event.target.closest('a');
-    if (!link) return;
-    document.querySelector('nav [aria-current]')?.removeAttribute('aria-current');
-    link.setAttribute('aria-current', 'location');
+const views = {
+    main: { panel: 'overview-panel', description: 'Bildirim kuyruğunu ve son 5 dakikanın sonuçlarını izle.' },
+    history: { panel: 'history-panel', description: 'Gönderimleri filtrele ve bir bildirimin ayrıntılarını aç.' },
+    composer: { panel: 'composer-panel', description: 'SMS, e-posta veya anlık bildirim oluştur.' },
+};
+const viewLinks = [...$('workspace-nav').querySelectorAll('[data-view]')];
+const loadTrends = setupTrends(request);
+
+function showView(focusHeading = false) {
+    const fragment = window.location.hash.slice(1);
+    const current = Object.hasOwn(views, fragment) ? fragment : 'main';
+    let title;
+    for (const link of viewLinks) {
+        const active = link.dataset.view === current;
+        $(views[link.dataset.view].panel).hidden = !active;
+        if (active) {
+            link.setAttribute('aria-current', 'page');
+            title = link.textContent.trim();
+        } else {
+            link.removeAttribute('aria-current');
+        }
+    }
+    $('page-title').textContent = title;
+    $('page-description').textContent = views[current].description;
+    $('current-view').textContent = title;
+    $('page-actions').hidden = current === 'composer';
+    if (current === 'main') void loadTrends();
+    document.title = title + ' · Bildirim Merkezi';
+    if (focusHeading) {
+        $('page-title').focus({ preventScroll: true });
+        window.scrollTo(0, 0);
+    }
+}
+
+window.addEventListener('hashchange', () => showView(true));
+document.querySelector('.skip').addEventListener('click', (event) => {
+    event.preventDefault();
+    $('page-title').focus();
 });
+showView();
 updateChannel();
 $('submit').disabled = false;
 $('connect').disabled = false;

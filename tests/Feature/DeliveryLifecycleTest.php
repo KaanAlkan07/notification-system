@@ -5,11 +5,14 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Jobs\DeliverNotification;
+use App\Jobs\ReconcileWebhookDelivery;
 use App\Models\Notification;
 use App\Notifications\Delivery\ChannelRateLimiter;
+use App\Notifications\Delivery\WebhookProvider;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -133,6 +136,18 @@ final class DeliveryLifecycleTest extends TestCase
         $this->assertSame('http_503', $notification->failure_code);
     }
 
+    public function test_fractional_retry_time_never_shortens_the_provider_wait(): void
+    {
+        $this->travelTo(now()->setMicrosecond(750_000));
+        $this->allowSend();
+        $notification = $this->notification();
+        Http::fake(['provider.test/*' => Http::response([], 429, ['Retry-After' => '7'])]);
+
+        $this->runDelivery($notification)->assertReleased(8);
+
+        $this->assertGreaterThanOrEqual(now()->addSeconds(7), $notification->refresh()->next_attempt_at);
+    }
+
     public function test_timeout_is_uncertain_and_is_never_automatically_resent(): void
     {
         $this->allowSend();
@@ -147,6 +162,115 @@ final class DeliveryLifecycleTest extends TestCase
         $this->assertSame('transport_error', $notification->failure_code);
     }
 
+    public function test_seven_digit_provider_timestamp_is_accepted(): void
+    {
+        $this->allowSend();
+        $notification = $this->notification();
+        $messageId = (string) Str::uuid();
+        Http::fake(['provider.test/*' => Http::response([
+            'messageId' => $messageId,
+            'status' => 'accepted',
+            'timestamp' => '2026-01-01T03:00:00.1234567+03:00',
+        ], 202)]);
+
+        $this->runDelivery($notification);
+
+        $this->assertSame('accepted', $notification->refresh()->status);
+        $this->assertSame($messageId, $notification->provider_message_id);
+    }
+
+    public function test_timeout_is_resolved_by_reading_provider_receipt_without_sending_again(): void
+    {
+        Queue::fake();
+        $this->allowSend();
+        $notification = $this->notification(['retry_generation' => 2]);
+        $messageId = (string) Str::uuid();
+        config(['notifications.provider_status_url' => 'https://provider.test/status']);
+        Http::fake([
+            'provider.test/notifications' => Http::failedConnection(),
+            'provider.test/status' => Http::sequence()->push(['status' => 'pending'])->push([
+                'status' => 'accepted', 'messageId' => $messageId, 'timestamp' => '2026-01-01T00:00:00.1234567Z',
+            ]),
+        ]);
+
+        $this->runDelivery($notification, 2);
+        $this->assertSame('uncertain', $notification->refresh()->status);
+        Queue::assertPushed(ReconcileWebhookDelivery::class, 1);
+        $job = Queue::pushed(ReconcileWebhookDelivery::class)->sole()->withFakeQueueInteractions();
+        $this->app->call([$job, 'handle']);
+        $job->assertReleased();
+        $this->assertSame('uncertain', $notification->refresh()->status);
+
+        $this->app->call([$job, 'handle']);
+        $this->app->call([$job, 'handle']);
+
+        Http::assertSentCount(3);
+        $this->assertCount(1, Http::recorded(fn (Request $request) => $request->method() === 'POST'));
+        $lookups = Http::recorded(fn (Request $request) => $request->method() === 'GET');
+        $this->assertCount(2, $lookups);
+        $this->assertTrue($lookups->every(fn (array $pair) => $pair[0]->method() === 'GET'
+            && $pair[0]->hasHeader('Idempotency-Key', $notification->id.':2')
+            && $pair[0]->hasHeader('X-Correlation-ID', $notification->correlation_id)));
+        Queue::assertNotPushed(DeliverNotification::class);
+        $this->assertSame('accepted', $notification->refresh()->status);
+        $this->assertSame($messageId, $notification->provider_message_id);
+        $this->assertSame(1, $notification->attempts);
+        $this->assertNull($notification->failure_code);
+    }
+
+    public function test_only_a_rejection_for_the_current_attempt_can_schedule_one_resend(): void
+    {
+        Queue::fake();
+        $this->freezeSecond();
+        config(['notifications.provider_status_url' => 'https://provider.test/status']);
+        $identity = $this->app->make(WebhookProvider::class)->reconciliationIdentity();
+        $notification = $this->notification([
+            'status' => 'uncertain', 'attempts' => 2, 'failure_code' => 'transport_error',
+            'finished_at' => now(), 'webhook_provider_identity' => $identity,
+        ]);
+        Http::fake(['provider.test/status' => Http::sequence()
+            ->push([], 404)
+            ->push(['status' => 'rejected', 'attempt' => 1])
+            ->push(['status' => 'rejected', 'attempt' => 2], 200, ['Retry-After' => '17'])]);
+        $job = (new ReconcileWebhookDelivery($notification->id, 0, 2, $identity))->withFakeQueueInteractions();
+
+        for ($i = 0; $i < 2; $i++) {
+            $this->app->call([$job, 'handle']);
+            Queue::assertNotPushed(DeliverNotification::class);
+            $this->assertSame('uncertain', $notification->refresh()->status);
+        }
+        $this->app->call([$job, 'handle']);
+        $this->app->call([$job, 'handle']);
+
+        Http::assertSentCount(3);
+        Http::assertSent(fn (Request $request) => $request->hasHeader('X-Delivery-Attempt', '2'));
+        Queue::assertPushed(DeliverNotification::class, 1);
+        $this->assertSame('retrying', $notification->refresh()->status);
+        $this->assertSame(2, $notification->attempts);
+        $this->assertTrue($notification->next_attempt_at->equalTo(now()->addSeconds(17)));
+    }
+
+    public function test_an_unresolved_lookup_stops_polling_without_resending(): void
+    {
+        Queue::fake();
+        config(['notifications.provider_status_url' => 'https://provider.test/status']);
+        $identity = $this->app->make(WebhookProvider::class)->reconciliationIdentity();
+        $notification = $this->notification([
+            'status' => 'uncertain', 'attempts' => 1, 'failure_code' => 'transport_error',
+            'webhook_provider_identity' => $identity,
+        ]);
+        Http::fake(['provider.test/status' => Http::response(['status' => 'pending'])]);
+        $job = (new ReconcileWebhookDelivery($notification->id, 0, 1, $identity))->withFakeQueueInteractions();
+        $job->job->attempts = 6;
+
+        $this->app->call([$job, 'handle']);
+
+        $job->assertNotReleased();
+        Queue::assertNotPushed(DeliverNotification::class);
+        $this->assertSame('uncertain', $notification->refresh()->status);
+        $this->assertSame('transport_error', $notification->failure_code);
+    }
+
     public function test_malformed_acceptance_rejects_invalid_calendar_values(): void
     {
         $this->allowSend();
@@ -154,7 +278,7 @@ final class DeliveryLifecycleTest extends TestCase
         Http::fake(['provider.test/*' => Http::response([
             'messageId' => (string) Str::uuid(),
             'status' => 'accepted',
-            'timestamp' => '2026-02-30T10:00:00Z',
+            'timestamp' => '2026-02-30T10:00:00.1234567Z',
         ], 202)]);
 
         $this->runDelivery($notification)->assertNotReleased();

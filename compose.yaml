@@ -16,8 +16,18 @@ x-laravel: &laravel
     CACHE_STORE: redis
     REDIS_HOST: redis
     NOTIFICATION_PROVIDER_URL: "${NOTIFICATION_PROVIDER_URL:-http://provider:8080/notifications}"
+    NOTIFICATION_PROVIDER_STATUS_URL: "${NOTIFICATION_PROVIDER_STATUS_URL:-}"
+    NOTIFICATION_PROVIDER_STATUS_TOKEN: "${NOTIFICATION_PROVIDER_STATUS_TOKEN:-}"
     NOTIFICATION_API_TOKEN: "${NOTIFICATION_API_TOKEN:-}"
     NOTIFICATION_SMS_PROVIDER: "${NOTIFICATION_SMS_PROVIDER:-webhook}"
+    NOTIFICATION_EMAIL_PROVIDER: "${NOTIFICATION_EMAIL_PROVIDER:-webhook}"
+    NOTIFICATION_SMTP_SCHEME: "${NOTIFICATION_SMTP_SCHEME:-smtp}"
+    NOTIFICATION_SMTP_HOST: "${NOTIFICATION_SMTP_HOST:-}"
+    NOTIFICATION_SMTP_PORT: "${NOTIFICATION_SMTP_PORT:-587}"
+    NOTIFICATION_SMTP_USERNAME: "${NOTIFICATION_SMTP_USERNAME:-}"
+    NOTIFICATION_SMTP_PASSWORD: "${NOTIFICATION_SMTP_PASSWORD:-}"
+    NOTIFICATION_MAIL_FROM: "${NOTIFICATION_MAIL_FROM:-}"
+    NOTIFICATION_MAIL_FROM_NAME: "${NOTIFICATION_MAIL_FROM_NAME:-Bildirim Merkezi}"
     TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"
     TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN:-}"
     TWILIO_FROM: "${TWILIO_FROM:-}"
@@ -65,6 +75,7 @@ services:
     command: ["php", "-S", "0.0.0.0:8080", "/provider-router.php"]
     volumes:
       - ./tools/provider-router.php:/provider-router.php:ro
+      - provider-data:/tmp
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
       interval: 2s
@@ -122,3 +133,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  provider-data:
