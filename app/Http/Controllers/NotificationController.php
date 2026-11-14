@@ -4,13 +4,16 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\CreateNotificationRequest;
 use App\Http\Requests\ListNotificationsRequest;
+use App\Jobs\DeliverNotification;
 use App\Models\Notification;
 use App\Notifications\AcceptNotifications;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 
 class NotificationController
 {
@@ -77,6 +80,45 @@ class NotificationController
         return response()->json(['data' => $notification]);
     }
 
+    public function retry(Request $request, string $id): JsonResponse
+    {
+        $generation = (int) $request->validate(['retry_generation' => ['required', 'integer', 'min:0']])['retry_generation'];
+        $notification = DB::transaction(function () use ($id, $generation): Notification {
+            $notification = Notification::query()->lockForUpdate()->findOrFail($id);
+            abort_unless($notification->status === 'failed' && $notification->retry_generation === $generation,
+                409, 'The notification is no longer eligible for this retry.');
+
+            $notification->update([
+                'status' => 'pending',
+                'retry_generation' => $generation + 1,
+                'attempts' => 0,
+                'scheduled_at' => now(),
+                'next_attempt_at' => null,
+                'processing_started_at' => null,
+                'provider_message_id' => null,
+                'delivery_status' => null,
+                'delivery_error_code' => null,
+                'delivery_updated_at' => null,
+                'failure_code' => null,
+                'finished_at' => null,
+            ]);
+
+            Queue::connection('database')->push(
+                new DeliverNotification($id, $notification->retry_generation), queue: $notification->priority,
+            );
+
+            return $notification;
+        }, attempts: 3);
+
+        Log::info('notification.manual_retry_enqueued', [
+            'notification_id' => $id,
+            'notification_correlation_id' => $notification->correlation_id,
+            'retry_generation' => $notification->retry_generation,
+        ]);
+
+        return response()->json(['data' => $notification], 202, ['Location' => '/api/v1/notifications/'.$id]);
+    }
+
     private function batch(string $id): array
     {
         $batch = DB::table('notification_batches')->where('id', $id)->first();
@@ -91,7 +133,7 @@ class NotificationController
 
     private function page(Builder $query, array $filters): array
     {
-        foreach (['status', 'channel'] as $column) {
+        foreach (['status', 'delivery_status', 'channel'] as $column) {
             if (isset($filters[$column])) {
                 $query->where($column, $filters[$column]);
             }

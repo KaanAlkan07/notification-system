@@ -132,6 +132,44 @@ class NotificationApiTest extends TestCase
         $this->assertDatabaseCount('notifications', 0);
     }
 
+    public function test_manual_retry_requeues_a_failure_once_and_keeps_the_notification_id(): void
+    {
+        $id = $this->postJson(self::BASE, $this->sms(['priority' => 'high']))->assertAccepted()->json('data.id');
+        DB::table('jobs')->delete();
+        DB::table('notifications')->where('id', $id)->update([
+            'status' => 'failed',
+            'attempts' => 5,
+            'failure_code' => 'http_503',
+            'finished_at' => now(),
+        ]);
+        $path = self::BASE.'/'.$id.'/retry';
+
+        $this->postJson($path, ['retry_generation' => 0])->assertAccepted()
+            ->assertJsonPath('data.id', $id)
+            ->assertJsonPath('data.status', 'pending')
+            ->assertJsonPath('data.attempts', 0)
+            ->assertJsonPath('data.failure_code', null)
+            ->assertJsonPath('data.finished_at', null)
+            ->assertJsonPath('data.retry_generation', 1);
+
+        $this->postJson($path, ['retry_generation' => 0])->assertConflict();
+        DB::table('notifications')->where('id', $id)->update(['status' => 'failed']);
+        $this->postJson($path, ['retry_generation' => 0])->assertConflict();
+        $this->assertDatabaseCount('jobs', 1);
+        $this->assertDatabaseHas('jobs', ['queue' => 'high']);
+        $this->assertDatabaseCount('notifications', 1);
+    }
+
+    public function test_manual_retry_is_rejected_for_uncertain_deliveries(): void
+    {
+        $id = $this->postJson(self::BASE, $this->sms())->assertAccepted()->json('data.id');
+        DB::table('notifications')->where('id', $id)->update(['status' => 'uncertain']);
+
+        $this->postJson(self::BASE.'/'.$id.'/retry', ['retry_generation' => 0])->assertConflict();
+        $this->assertDatabaseCount('jobs', 1);
+        $this->assertDatabaseHas('notifications', ['id' => $id, 'status' => 'uncertain']);
+    }
+
     public function test_bearer_token_protects_api_and_metrics_when_configured(): void
     {
         config(['notifications.api_token' => 'test-token']);
@@ -142,6 +180,30 @@ class NotificationApiTest extends TestCase
             ->assertSee('notifications_queue_depth{priority="high"} 0', false);
         Redis::shouldReceive('connection')->andThrow(new RuntimeException('redis unavailable'));
         $this->getJson('/health')->assertStatus(503)->assertJsonPath('checks.redis', 'down');
+    }
+
+    public function test_metrics_report_queue_depth_and_recent_outcomes_and_latency(): void
+    {
+        $this->freezeSecond();
+        $accepted = $this->postJson(self::BASE, $this->sms())->assertAccepted()->json('data.id');
+        $failed = $this->postJson(self::BASE, $this->sms())->assertAccepted()->json('data.id');
+        $old = $this->postJson(self::BASE, $this->sms())->assertAccepted()->json('data.id');
+        DB::table('jobs')->delete();
+        DB::table('notifications')->where('id', $accepted)->update([
+            'status' => 'accepted', 'scheduled_at' => now()->subSeconds(7), 'finished_at' => now(),
+        ]);
+        DB::table('notifications')->where('id', $failed)->update(['status' => 'failed', 'finished_at' => now()]);
+        DB::table('notifications')->where('id', $old)->update([
+            'status' => 'failed', 'scheduled_at' => now()->subMinutes(7), 'finished_at' => now()->subMinutes(6),
+        ]);
+        $this->postJson(self::BASE, $this->sms(['priority' => 'high']))->assertAccepted();
+
+        $this->get('/metrics')->assertOk()
+            ->assertSee('notifications_queue_depth{priority="high"} 1', false)
+            ->assertSee('notifications_outcomes_5m{channel="sms",outcome="failed"} 1', false)
+            ->assertSee('notifications_outcome_ratio_5m{channel="sms",outcome="accepted"} 0.500000', false)
+            ->assertSee('notifications_outcome_ratio_5m{channel="sms",outcome="failed"} 0.500000', false)
+            ->assertSee('notifications_acceptance_latency_seconds_avg_5m{channel="sms"} 7.000000', false);
     }
 
     private function sms(array $overrides = []): array

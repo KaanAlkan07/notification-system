@@ -11,11 +11,13 @@ final readonly class ProviderResult
         public ?string $messageId = null,
         public ?string $failureCode = null,
         public ?string $retryAfter = null,
+        public ?string $deliveryStatus = null,
+        public ?string $deliveryErrorCode = null,
     ) {}
 
-    public static function accepted(string $messageId): self
+    public static function accepted(string $messageId, ?string $deliveryStatus = null, ?string $deliveryErrorCode = null): self
     {
-        return new self('accepted', messageId: $messageId);
+        return new self('accepted', messageId: $messageId, deliveryStatus: $deliveryStatus, deliveryErrorCode: $deliveryErrorCode);
     }
 
     public static function retryable(string $code, ?string $retryAfter): self

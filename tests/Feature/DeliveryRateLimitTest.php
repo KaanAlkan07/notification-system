@@ -23,14 +23,21 @@ final class DeliveryRateLimitTest extends TestCase
         $firstWorker = new ChannelRateLimiter;
         $secondWorker = new ChannelRateLimiter;
 
-        $this->assertTrue($firstWorker->acquire('sms'));
-        $this->assertTrue($secondWorker->acquire('sms'));
-        $this->assertFalse($firstWorker->acquire('sms'));
-        $this->assertTrue($secondWorker->acquire('email'));
-        $this->assertTrue($secondWorker->acquire('push'));
+        $this->assertTrue($firstWorker->acquire('sms', 'first'));
+        $this->assertTrue($secondWorker->acquire('sms', 'second'));
+        $this->assertFalse($firstWorker->acquire('sms', 'third'));
+        $this->assertTrue($secondWorker->acquire('email', 'first'));
+        $this->assertTrue($secondWorker->acquire('push', 'first'));
 
         usleep(1_050_000);
 
-        $this->assertTrue($firstWorker->acquire('sms'));
+        $this->assertFalse($firstWorker->acquire('sms', 'third'), 'In-flight requests must still count after one second.');
+        $secondWorker->complete('sms', 'second');
+        $this->assertFalse($firstWorker->acquire('sms', 'third'), 'Completed requests must still count for one second.');
+
+        usleep(1_050_000);
+
+        $this->assertTrue($firstWorker->acquire('sms', 'third'));
+        $this->assertFalse($secondWorker->acquire('sms', 'fourth'), 'The first request is still in flight.');
     }
 }

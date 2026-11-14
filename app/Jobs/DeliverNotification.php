@@ -8,12 +8,14 @@ use App\Models\Notification;
 use App\Notifications\Delivery\ChannelRateLimiter;
 use App\Notifications\Delivery\ProviderResult;
 use App\Notifications\Delivery\RetryPolicy;
+use App\Notifications\Delivery\TwilioSms;
 use App\Notifications\Delivery\WebhookProvider;
 use Carbon\CarbonInterface;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Predis\PredisException;
 use RedisException;
 
@@ -26,12 +28,18 @@ final class DeliverNotification implements ShouldQueue
 
     public int $backoff = 5;
 
-    public function __construct(public string $notificationId) {}
+    public int $retryGeneration = 0;
 
-    public function handle(ChannelRateLimiter $limiter, WebhookProvider $provider, RetryPolicy $retryPolicy): void
+    public function __construct(public string $notificationId, int $retryGeneration = 0)
     {
+        $this->retryGeneration = $retryGeneration;
+    }
+
+    public function handle(ChannelRateLimiter $limiter, WebhookProvider $provider, RetryPolicy $retryPolicy, TwilioSms $twilio): void
+    {
+        $reservation = (string) Str::uuid();
         try {
-            $claim = $this->claim($limiter);
+            $claim = $this->claim($limiter, $reservation);
         } catch (PredisException|RedisException) {
             $this->release($this->backoff);
             Log::warning('delivery.limiter_unavailable', ['notification_id' => $this->notificationId]);
@@ -55,16 +63,24 @@ final class DeliverNotification implements ShouldQueue
             return;
         }
 
-        $result = $provider->send($claim);
+        $result = $claim->delivery_status === 'awaiting_receipt' ? $twilio->send($claim) : $provider->send($claim);
+        if ($result->status !== 'uncertain') {
+            try {
+                $limiter->complete($claim->channel, $reservation);
+            } catch (PredisException|RedisException) {
+                // The reservation stays in Redis until expiry if completion fails.
+                Log::warning('delivery.limiter_completion_failed', ['notification_id' => $this->notificationId]);
+            }
+        }
         $this->recordOutcome($claim, $result, $retryPolicy);
     }
 
-    private function claim(ChannelRateLimiter $limiter): Notification|int|null
+    private function claim(ChannelRateLimiter $limiter, string $reservation): Notification|int|null
     {
-        return DB::transaction(function () use ($limiter): Notification|int|null {
+        return DB::transaction(function () use ($limiter, $reservation): Notification|int|null {
             $notification = Notification::query()->lockForUpdate()->find($this->notificationId);
 
-            if ($notification === null) {
+            if ($notification === null || $notification->retry_generation !== $this->retryGeneration) {
                 return null;
             }
 
@@ -84,7 +100,7 @@ final class DeliverNotification implements ShouldQueue
                 return max(1, (int) ceil($now->diffInSeconds($availableAt, false)));
             }
 
-            if (! $limiter->acquire($notification->channel)) {
+            if (! $limiter->acquire($notification->channel, $reservation)) {
                 return random_int(1, 2);
             }
 
@@ -93,6 +109,9 @@ final class DeliverNotification implements ShouldQueue
                 'attempts' => $notification->attempts + 1,
                 'next_attempt_at' => null,
                 'processing_started_at' => now(),
+                'delivery_status' => $notification->channel === 'sms' && config('notifications.sms_provider') === 'twilio'
+                    ? 'awaiting_receipt'
+                    : null,
             ])->save();
 
             return $notification;
@@ -137,6 +156,7 @@ final class DeliverNotification implements ShouldQueue
         $updated = Notification::query()
             ->whereKey($notification->id)
             ->where('status', 'processing')
+            ->where('retry_generation', $this->retryGeneration)
             ->where('attempts', $notification->attempts)
             ->update([
                 'status' => $status,
@@ -145,6 +165,9 @@ final class DeliverNotification implements ShouldQueue
                 'next_attempt_at' => $delay === null ? null : $now->copy()->addSeconds($delay),
                 'processing_started_at' => null,
                 'finished_at' => $delay === null ? $now : null,
+                'delivery_status' => $status === 'uncertain' ? $notification->delivery_status : $result->deliveryStatus,
+                'delivery_error_code' => $result->deliveryErrorCode,
+                'delivery_updated_at' => $result->deliveryStatus === null ? null : $now,
             ]);
 
         if ($updated === 0) {

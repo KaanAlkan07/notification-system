@@ -20,7 +20,9 @@ final class WebhookProvider
                 ->connectTimeout((float) config('notifications.provider_connect_timeout', 2))
                 ->timeout((float) config('notifications.provider_timeout', 5))
                 ->withHeaders([
-                    'Idempotency-Key' => $notification->id,
+                    'Idempotency-Key' => $notification->retry_generation > 0
+                        ? $notification->id.':'.$notification->retry_generation
+                        : $notification->id,
                     'X-Correlation-ID' => $notification->correlation_id,
                 ])
                 ->post((string) config('notifications.provider_url'), [

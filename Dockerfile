@@ -20,4 +20,4 @@ RUN mkdir -p .phpunit.cache bootstrap/cache storage/framework/cache storage/fram
 USER www-data
 ENV COMPOSER_HOME=/tmp/composer
 EXPOSE 8080
-CMD ["php", "-S", "0.0.0.0:8080", "-t", "public", "public/index.php"]
+CMD ["php", "-S", "0.0.0.0:8080", "-t", "public"]

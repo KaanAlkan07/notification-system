@@ -57,7 +57,7 @@ final class DeliveryLifecycleTest extends TestCase
     public function test_throttling_leaves_provider_attempt_budget_untouched(): void
     {
         $this->mock(ChannelRateLimiter::class)
-            ->shouldReceive('acquire')->once()->with('sms')->andReturnFalse();
+            ->shouldReceive('acquire')->once()->with('sms', \Mockery::type('string'))->andReturnFalse();
         $notification = $this->notification();
 
         $job = $this->runDelivery($notification);
@@ -66,6 +66,25 @@ final class DeliveryLifecycleTest extends TestCase
         Http::assertNothingSent();
         $this->assertSame('pending', $notification->refresh()->status);
         $this->assertSame(0, $notification->attempts);
+    }
+
+    public function test_only_the_current_retry_cycle_can_deliver(): void
+    {
+        $this->allowSend();
+        $notification = $this->notification(['retry_generation' => 1]);
+        Http::fake(['provider.test/*' => Http::response([
+            'messageId' => (string) Str::uuid(),
+            'status' => 'accepted',
+            'timestamp' => '2026-01-01T00:00:00Z',
+        ], 202)]);
+
+        $this->runDelivery($notification);
+        Http::assertNothingSent();
+
+        $this->runDelivery($notification, 1);
+        Http::assertSentCount(1);
+        Http::assertSent(fn (Request $request) => $request->hasHeader('Idempotency-Key', $notification->id.':1'));
+        $this->assertSame('accepted', $notification->refresh()->status);
     }
 
     public function test_rate_limited_provider_retry_survives_early_redelivery_and_keeps_its_key(): void
@@ -191,8 +210,9 @@ final class DeliveryLifecycleTest extends TestCase
 
     private function allowSend(): void
     {
-        $this->mock(ChannelRateLimiter::class)
-            ->shouldReceive('acquire')->with('sms')->andReturnTrue();
+        $limiter = $this->mock(ChannelRateLimiter::class);
+        $limiter->shouldReceive('acquire')->with('sms', \Mockery::type('string'))->andReturnTrue();
+        $limiter->shouldReceive('complete')->with('sms', \Mockery::type('string'));
     }
 
     private function notification(array $overrides = []): Notification
@@ -210,9 +230,9 @@ final class DeliveryLifecycleTest extends TestCase
         ], $overrides)));
     }
 
-    private function runDelivery(Notification $notification): DeliverNotification
+    private function runDelivery(Notification $notification, int $retryGeneration = 0): DeliverNotification
     {
-        $job = (new DeliverNotification($notification->id))->withFakeQueueInteractions();
+        $job = (new DeliverNotification($notification->id, $retryGeneration))->withFakeQueueInteractions();
         $this->app->call([$job, 'handle']);
 
         return $job;

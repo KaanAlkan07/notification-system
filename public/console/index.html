@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="tr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/console/app.css">
+    <script type="module" src="/console/app.js"></script>
+    <title>Bildirim Merkezi</title>
+</head>
+<body>
+<a class="skip" href="#main">İçeriğe geç</a>
+<header class="top">
+    <a class="brand" href="/" aria-label="Bildirim Merkezi ana sayfa">
+        <svg aria-hidden="true" width="27" height="27" viewBox="0 0 28 28" fill="none">
+            <path d="M3 8h8l5 6h9M3 20h8l5-6M20 9l5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Bildirim Merkezi
+    </a>
+    <div class="top-context">
+        <span>Çalışma alanı <span class="slash">/</span> Bildirimler</span>
+        <span class="health" id="health" data-state="loading"><i></i><span>Bağlantı kontrol ediliyor</span></span>
+    </div>
+</header>
+<div class="layout">
+    <aside class="sidebar">
+        <nav aria-label="Çalışma alanı">
+            <a href="#main" aria-current="page">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM4 10h16M9 10v9"/></svg>
+                Genel bakış
+            </a>
+            <a href="#history">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 5h14M5 12h14M5 19h14"/></svg>
+                Bildirim geçmişi
+            </a>
+            <a href="#composer">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                Yeni bildirim
+            </a>
+        </nav>
+        <details class="access" id="access">
+            <summary>API erişimi</summary>
+            <form id="access-form" method="post" aria-label="API erişimi">
+                <label for="token">API anahtarı</label>
+                <input type="password" id="token" autocomplete="off">
+                <button id="connect" type="submit" class="button" disabled>Bağlan</button>
+            </form>
+        </details>
+    </aside>
+    <main class="sheet" id="main" tabindex="-1">
+        <header class="page-heading">
+            <div>
+                <h1>Bildirimler</h1>
+                <p>SMS, e-posta ve anlık bildirimleri tek ekrandan yönet.</p>
+            </div>
+            <button class="button" id="refresh" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2 5.3"/></svg>
+                Yenile
+            </button>
+        </header>
+        <p class="notice" id="connection-notice" role="alert" hidden></p>
+        <section class="overview" aria-label="Teslimat özeti">
+            <div><span>Kuyruktaki işler</span><strong id="queued">—</strong><small>Tüm öncelikler</small></div>
+            <div><span>Kabul edilen</span><strong id="accepted">—</strong><small>Son 5 dakika</small></div>
+            <div><span>Başarısız veya belirsiz</span><strong id="failed">—</strong><small>Son 5 dakika</small></div>
+        </section>
+        <div class="workspace">
+            <section id="history" class="history" aria-labelledby="history-heading">
+                <header class="section-heading">
+                    <div>
+                        <h2 id="history-heading">Bildirim geçmişi</h2>
+                        <p id="freshness">Bildirimler yükleniyor</p>
+                    </div>
+                </header>
+                <search>
+                    <form id="filters" class="filters" aria-label="Bildirimleri filtrele">
+                        <label><span class="sr-only">Kanal filtresi</span>
+                            <select name="channel">
+                                <option value="">Tüm kanallar</option>
+                                <option value="sms">SMS</option><option value="email">E-posta</option><option value="push">Anlık bildirim</option>
+                            </select>
+                        </label>
+                        <label><span class="sr-only">Durum filtresi</span>
+                            <select name="status">
+                                <option value="">Tüm durumlar</option>
+                                <option value="accepted">Kabul edildi</option><option value="pending">Bekliyor</option>
+                                <option value="processing">İşleniyor</option><option value="retrying">Tekrar denenecek</option>
+                                <option value="failed">Başarısız</option><option value="uncertain">Belirsiz</option>
+                                <option value="cancelled">İptal edildi</option>
+                            </select>
+                        </label>
+                        <label><span class="sr-only">Teslimat filtresi</span>
+                            <select name="delivery_status">
+                                <option value="">Tüm teslimat durumları</option>
+                                <option value="awaiting_receipt">Teslimat onayı bekleniyor</option>
+                                <option value="sent">Operatöre iletildi</option>
+                                <option value="delivered">Teslim edildi</option>
+                                <option value="undelivered">Teslim edilemedi</option>
+                            </select>
+                        </label>
+                        <button type="submit" class="button">Filtrele</button>
+                    </form>
+                </search>
+                <div class="table-scroll" role="region" aria-labelledby="history-heading" tabindex="0">
+                    <table>
+                        <thead><tr><th scope="col">Bildirim</th><th scope="col">Durum</th><th scope="col">Öncelik</th><th scope="col">Oluşturulma</th></tr></thead>
+                        <tbody id="rows"></tbody>
+                    </table>
+                </div>
+                <p class="empty" id="empty">Bildirimler yükleniyor…</p>
+                <footer class="pager" id="pager" hidden>
+                    <button type="button" class="button" id="previous">Önceki</button>
+                    <span id="page-number"></span>
+                    <button type="button" class="button" id="next">Sonraki</button>
+                </footer>
+            </section>
+            <section id="composer" class="composer" aria-labelledby="compose-heading">
+                <header class="section-heading">
+                    <h2 id="compose-heading">Yeni bildirim</h2>
+                    <button class="text-button" id="sample" type="button">Örnek doldur</button>
+                </header>
+                <form id="compose" method="post" action="/api/v1/notifications" aria-labelledby="compose-heading">
+                    <fieldset>
+                        <legend>Kanal</legend>
+                        <div class="channels">
+                            <input type="radio" name="channel" id="sms" value="sms" checked><label for="sms">SMS</label>
+                            <input type="radio" name="channel" id="email" value="email"><label for="email">E-posta</label>
+                            <input type="radio" name="channel" id="push" value="push"><label for="push">Anlık</label>
+                        </div>
+                    </fieldset>
+                    <div class="field">
+                        <label for="recipient">Alıcı <span aria-hidden="true">*</span></label>
+                        <input type="tel" name="recipient" id="recipient" maxlength="255" required aria-describedby="recipient-hint" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="+15550102030">
+                        <small id="recipient-hint">Ülke koduyla birlikte yaz.</small>
+                    </div>
+                    <div class="field">
+                        <label for="content">Mesaj <span aria-hidden="true">*</span></label>
+                        <textarea name="content" id="content" rows="3" required aria-describedby="count" placeholder="Bildirim metnini yaz"></textarea>
+                        <small id="count" class="count">0 / 160</small>
+                    </div>
+                    <div class="field">
+                        <label for="priority">Öncelik</label>
+                        <select name="priority" id="priority"><option value="normal">Normal</option><option value="high">Yüksek</option><option value="low">Düşük</option></select>
+                    </div>
+                    <details class="schedule" id="schedule">
+                        <summary>Gönderimi zamanla</summary>
+                        <div class="field">
+                            <label for="scheduled_at">Yerel tarih ve saat</label>
+                            <input type="datetime-local" name="scheduled_at" id="scheduled_at">
+                        </div>
+                    </details>
+                    <p class="notice" id="form-message" role="status" tabindex="-1" hidden></p>
+                    <button type="submit" class="button primary" id="submit" disabled>
+                        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 4 16 8-16 8 3-8-3-8ZM7 12h13"/></svg>
+                        <span>Kuyruğa ekle</span>
+                    </button>
+                    <noscript><p>Bildirim oluşturmak için JavaScript’i etkinleştir.</p></noscript>
+                </form>
+            </section>
+        </div>
+    </main>
+</div>
+<dialog id="detail" aria-labelledby="detail-title">
+    <header class="section-heading">
+        <h2 id="detail-title">Bildirim detayı</h2>
+        <form method="dialog"><button id="detail-close" class="button" type="submit">Kapat</button></form>
+    </header>
+    <p id="detail-state" role="status"></p>
+    <dl class="detail-fields" id="detail-fields"></dl>
+    <p id="detail-message" class="notice" role="status" hidden></p>
+    <button id="cancel" type="button" class="button danger" hidden>Bildirimi iptal et</button>
+    <button id="retry" type="button" class="button" hidden>Yeniden dene</button>
+</dialog>
+</body>
+</html>

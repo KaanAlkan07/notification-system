@@ -23,6 +23,7 @@ class ListNotificationsRequest extends FormRequest
 
         return [
             'status' => ['sometimes', 'required', 'string', Rule::in(Notification::STATUSES)],
+            'delivery_status' => ['sometimes', 'required', 'string', Rule::in(Notification::DELIVERY_STATUSES)],
             'channel' => ['sometimes', 'required', 'string', Rule::in(Notification::CHANNELS)],
             'from' => ['sometimes', 'required', 'string', $timestamp],
             'to' => ['sometimes', 'required', 'string', $timestamp],

@@ -7,4 +7,11 @@ return [
     'provider_timeout' => 5,
     'rate_limit' => 100,
     'max_attempts' => 5,
+    'sms_provider' => env('NOTIFICATION_SMS_PROVIDER', 'webhook'),
+    'twilio' => [
+        'account_sid' => env('TWILIO_ACCOUNT_SID', ''),
+        'auth_token' => env('TWILIO_AUTH_TOKEN', ''),
+        'from' => env('TWILIO_FROM', ''),
+        'callback_base_url' => env('TWILIO_CALLBACK_BASE_URL', ''),
+    ],
 ];
