@@ -19,8 +19,13 @@ security:
   - {}
 tags:
   - name: Notifications
+    description: Create, inspect, cancel, and retry notifications.
   - name: Batches
+    description: Create batches and inspect their members.
   - name: Operations
+    description: Read health and delivery metrics.
+  - name: Provider callbacks
+    description: Receive signed delivery status updates.
 paths:
   /api/v1/notifications:
     parameters:
@@ -96,6 +101,7 @@ paths:
           in: query
           schema:
             $ref: '#/components/schemas/Channel'
+        - $ref: '#/components/parameters/DeliveryStatusFilter'
         - name: from
           in: query
           description: Inclusive lower bound on creation time
@@ -164,6 +170,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/notifications/{id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - $ref: '#/components/parameters/CorrelationId'
+    post:
+      operationId: retryNotification
+      summary: Requeue a failed notification
+      description: Submit the current retry generation from the notification details. A successful request keeps the notification ID and starts a fresh delivery cycle with zero attempts.
+      tags: [Notifications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retry_generation]
+              properties:
+                retry_generation: {type: integer, minimum: 0}
+      responses:
+        '202':
+          description: Notification requeued
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+            Location:
+              schema: {type: string, format: uri-reference}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The notification is no longer failed or the retry generation changed
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
   /api/v1/notification-batches:
     parameters:
       - $ref: '#/components/parameters/CorrelationId'
@@ -224,6 +275,7 @@ paths:
       description: Filters affect the member page. Counts always describe the whole batch.
       tags: [Batches]
       parameters:
+        - $ref: '#/components/parameters/DeliveryStatusFilter'
         - name: status
           in: query
           schema:
@@ -295,12 +347,52 @@ paths:
                 type: string
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /webhooks/twilio/sms/{id}/{generation}/{attempt}:
+    post:
+      operationId: receiveTwilioSmsReceipt
+      summary: Receive a signed Twilio SMS status callback
+      tags: [Provider callbacks]
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ResourceId'
+        - {in: path, name: generation, required: true, schema: {type: integer, minimum: 0}}
+        - {in: path, name: attempt, required: true, schema: {type: integer, minimum: 1}}
+        - {in: header, name: X-Twilio-Signature, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [AccountSid, MessageSid, MessageStatus]
+              properties:
+                AccountSid: {type: string}
+                MessageSid: {type: string}
+                MessageStatus: {type: string}
+                ErrorCode: {type: string}
+      responses:
+        '204':
+          description: Signed callback acknowledged
+        '403':
+          description: Invalid signature or account
+        '404':
+          description: Twilio callback is unconfigured
+        '415':
+          description: Unsupported request content type
+        '422':
+          description: Malformed callback fields
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
   parameters:
+    DeliveryStatusFilter:
+      in: query
+      name: delivery_status
+      schema:
+        type: string
+        enum: [awaiting_receipt, sent, delivered, undelivered]
     ResourceId:
       name: id
       in: path
@@ -502,6 +594,7 @@ components:
         - priority
         - status
         - attempts
+        - retry_generation
         - scheduled_at
         - next_attempt_at
         - provider_message_id
@@ -509,6 +602,9 @@ components:
         - created_at
         - updated_at
         - finished_at
+        - delivery_status
+        - delivery_error_code
+        - delivery_updated_at
       properties:
         id:
           type: string
@@ -528,7 +624,11 @@ components:
         attempts:
           type: integer
           minimum: 0
-          description: Delivery attempts claimed by workers
+          description: Delivery attempts in the current delivery cycle
+        retry_generation:
+          type: integer
+          minimum: 0
+          description: Increments each time a failed notification is manually requeued
         scheduled_at:
           type: string
           format: date-time
@@ -545,6 +645,14 @@ components:
           type: string
           format: date-time
         finished_at:
+          $ref: '#/components/schemas/NullableDateTime'
+        delivery_status:
+          type: [string, 'null']
+          enum: [awaiting_receipt, sent, delivered, undelivered, null]
+          description: Most recent delivery receipt state. Null when no delivery tracking has started.
+        delivery_error_code:
+          type: [string, 'null']
+        delivery_updated_at:
           $ref: '#/components/schemas/NullableDateTime'
     NotificationResponse:
       type: object
@@ -652,6 +760,10 @@ components:
           priority: high
           status: pending
           attempts: 0
+          retry_generation: 0
+          delivery_status: null
+          delivery_error_code: null
+          delivery_updated_at: null
           scheduled_at: '2026-11-13T10:00:00Z'
           next_attempt_at: null
           provider_message_id: null
